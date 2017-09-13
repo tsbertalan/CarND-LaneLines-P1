@@ -1,0 +1,9 @@
+numpy 
+scipy 
+matplotlib 
+tensorflow 
+jupyter 
+opencv-python
+pillow
+moviepy
+
