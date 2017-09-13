@@ -6,8 +6,6 @@ import numpy as np
 import cv2
 from warnings import warn
 
-orange = 232, 119, 34
-
 
 def grayscale(img):
     """Applies the Grayscale transform
@@ -89,8 +87,8 @@ def hough_lines(img, rho, theta, threshold, min_line_len, max_line_gap):
     return lines
 
 
-def draw_hough_lines(img, lines, **kwargs):
-    line_img = np.zeros((img.shape[0], img.shape[1], 3), dtype=np.uint8)
+def draw_hough_lines(lines, rows, cols, **kwargs):
+    line_img = np.zeros((rows, cols, 3), dtype=np.uint8)
     draw_lines(line_img, lines, **kwargs)
     return line_img
 
@@ -99,7 +97,8 @@ def fake_color(bw, color=[1., 0, 0]):
     r, g, b = color
     return np.dstack((r * bw, b * bw, g * bw)).astype(bw.dtype)
 
-def weighted_img(img, initial_img, α=0.8, β=1., λ=0.):
+
+def weighted_img(img, initial_img, alpha=0.8, beta=1., gamma=0.):
     """
     `img` is the output of the hough_lines(), An image with lines drawn on it.
     Should be a blank image (all black) with lines drawn on it.
@@ -108,10 +107,10 @@ def weighted_img(img, initial_img, α=0.8, β=1., λ=0.):
     
     The result image is computed as follows:
     
-    initial_img * α + img * β + λ
+    initial_img * alpha + img * beta + gamma
     NOTE: initial_img and img must be the same shape!
     """
-    return cv2.addWeighted(img, α, initial_img, β, λ)
+    return cv2.addWeighted(img, alpha, initial_img, beta, gamma)
 
 
 def drawPolygon(vertices, ax=None, **kwargs):
@@ -122,7 +121,7 @@ def drawPolygon(vertices, ax=None, **kwargs):
         ax = plt.gca()
     from matplotlib.patches import Polygon
     from matplotlib.collections import PatchCollection
-    ax.add_patch(Polygon(vertices, True, **kwargs))
+    return ax.add_patch(Polygon(vertices, True, **kwargs))
 
 
 def tovec(l):
@@ -130,6 +129,7 @@ def tovec(l):
 
 
 def vecDec(f):
+    '''Decorator to ensure ndarray input.'''
     def wr(l):
         l = tovec(l)
         return f(l)
@@ -137,25 +137,44 @@ def vecDec(f):
 
 
 def inrect(x, y, bottom=0, top=540, left=0, right=960):
+    '''Is a point in the given rectangle?'''
     return (x >= left and x <= right and y >= bottom and y <= top)
 
 
 @vecDec
 def m(l):
+    '''Get slope from x1y1x2y2 form.'''
     return (l[3] - l[1]) / (l[2] - l[0]) 
 
 
 @vecDec
 def b(l):
+    '''Get intercept from x1y1x2y2 form.'''
     return (l[1] - m(l) * l[0])
 
 
+'''Check whether line is vertical.'''
 isvert = lambda l: l[0] == l[2]
 
 
 def intersection(l1, l2):
+    '''Find intersection of two lines.'''
+    # TODO: Probably should delete this.
     l1 = tovec(l1)
     l2 = tovec(l2)
+
+    def intersectionVert(l, lv):
+        x = lv[0]
+        bl = b(l)
+        ml = m(l)
+        return x, ml * x + bl
+
+    def intersectionHorz(l, lh):
+        y = lh[1]
+        bl = b(l)
+        ml = m(l)
+        return (y - bl) / ml, y
+
     try:
         if isvert(l1):
             return intersectionVert(l2, l1)
@@ -177,20 +196,7 @@ def intersection(l1, l2):
     return float(x), float(y)
 
 
-def intersectionVert(l, lv):
-    x = lv[0]
-    bl = b(l)
-    ml = m(l)
-    return x, ml * x + bl
-
-
-def intersectionHorz(l, lh):
-    y = lh[1]
-    bl = b(l)
-    ml = m(l)
-    return (y - bl) / ml, y
-
-
+# TODO: I don't think I use these anywhere; probably delete them.
 def horzline(y):
     return [0, y, 1, y]
 
@@ -199,8 +205,9 @@ def vertline(x):
     return [x, 0, x, 1]
 
 
-
 def extend_to_borders(line, bottom=None, top=540, left=0, right=960, horizon=.6):
+    '''Find two points on a line that intersect the rectangle boundaries.'''
+    # TODO: Delete/disuse or fold this into the upcoming Line class.
     if bottom is None:
         bottom = int(540 * horizon)
     line = tovec(line)
@@ -226,6 +233,7 @@ def extend_to_borders(line, bottom=None, top=540, left=0, right=960, horizon=.6)
 
 
 def lineup(l):
+    '''Ensure an x1y1x2y2-form line starts with its lower (in y-coord) point.'''
     x1, y1, x2, y2 = tovec(l)
     if y1 > y2:
         return np.array([x2, y2, x1, y1]).reshape(np.asarray(l).shape)
@@ -234,7 +242,8 @@ def lineup(l):
   
 
 def deduplicate_lines(lines, maxabsthresh=64, horizon=.6):
-    '''This could probably be replaced with something more standard like k-means.'''
+    '''Remove near-duplicates from a collection of lines.'''
+    # TODO: This could probably be replaced with something more standard like k-means.
     def mn(v):
         return sum(v) / len(v)
     nl = int(lines.size / 4)
@@ -266,6 +275,8 @@ def deduplicate_lines(lines, maxabsthresh=64, horizon=.6):
 
 
 def plotline(l, ax, extraxy=None, **kwargs):
+    '''Pretty-plot a line on an axis.'''
+    # TODO: Make into a Line method (though I should probably just use pixel/cv2 operations instead, since I don't want to be outputting matplotlib objects instead of simple image arrays.
     l = tovec(l)
     x = [l[0], l[2]]
     y = [l[1], l[3]]
@@ -274,9 +285,9 @@ def plotline(l, ax, extraxy=None, **kwargs):
         y.append(extraxy[1])
     return ax.plot(x, y, **kwargs)
 
-
+# TODO: I should just use cv2 functions for "plotting" my lines, so I don't need the following three functions.
 def fig2array(fig):
-    # optionally we can save it to a numpy array.
+    '''Rasterize a matplotlib figure.'''
     fig.tight_layout(pad=0)
     fig.canvas.draw()
     data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
@@ -304,6 +315,7 @@ def fig2data (fig):
 
 import io
 def save_ax_nosave(ax, **kwargs):
+    '''Rasterize a matplotlib axis.'''
     ax.axis("off")
     ax.figure.canvas.draw()
     trans = ax.figure.dpi_scale_trans.inverted() 
@@ -316,61 +328,96 @@ def save_ax_nosave(ax, **kwargs):
     return im
 
 
-class ImageProcessor(object):
+class Pipeline(object):
+    '''Pipeline for lane-line-finding.'''
     
-    def __init__(self, image, horizon=.6, horizonRadius=None, hoodClearance=0):
-        if horizonRadius is None:
-            calibration = .04
-            x1 = (1 - horizon) * (.5 - calibration) / .4  # Calibrate for a horizonRadius of `calibration` at horizon=.6
-            horizonRadius = .5 - x1
-        self.image = image
+    def __init__(self, horizon=.6, horizonRadius=None, hoodClearance=0):
         self.horizon = horizon
-        
+        self.horizonRadius = horizonRadius
+        self.hoodClearance = hoodClearance
+
+    @property
+    def vertices(self):
+        if self.horizonRadius is None:
+            calibration = .04
+            # Calibrate for a horizonRadius of `calibration` at horizon=.6
+            x1 = (1 - horizon) * (.5 - calibration) / .4
+            self.horizonRadius = .5 - x1
+        x = self.cols
+        y = self.rows
+        return np.array([[
+                    (0, y * (1. - self.hoodClearance)), (x * (.5 - self.horizonRadius), y * self.horizon),
+                    (x * (.5 + self.horizonRadius), y * self.horizon), (x, y * (1. - self.hoodClearance))]
+                   ], dtype=np.int32)
+
+    def prepare(self, image):
+        self.rows, self.cols = image.shape[:2]
         out = grayscale(image)
         out = gaussian_blur(out, 5)
         out = canny(out, 50, 150)
+        out = region_of_interest(out, self.vertices)
+        return out
 
-        y, x = out.shape
-        vertices = np.array([[
-                    (0, y * (1. - hoodClearance)), (x * (.5 - horizonRadius), y * horizon),
-                    (x * (.5 + horizonRadius), y * horizon), (x, y * (1. - hoodClearance))]
-                   ], dtype=np.int32)
-        out = region_of_interest(out, vertices)
-
-        lines = hough_lines(out, 20, np.pi / 120, 42, 50, 20)
+    def findLines(self, preparedImage):
+        lines = hough_lines(preparedImage, 20, np.pi / 120, 42, 50, 20)
         assert lines is not None
-        self.originalLines = np.copy(lines)
-        lines, lineset = deduplicate_lines(lines, horizon=horizon)
+        return lines
 
-        acc = fake_color(out)
-        for line in lines:
-            # color = np.random.randint(low=0, high=256, size=(3,)).tolist()
-            acc = weighted_img(draw_hough_lines(out, [line], thickness=8, color=orange), acc, 1, 1)
-        out = acc
+    def deduplicate_lines(self, allLines):
+        lines, _lineset = deduplicate_lines(allLines, horizon=self.horizon)
+        return lines
 
-        out = weighted_img(out, image,)
+    def bakeLines(self, originalImage, preparedImage, lines, thickness=12, color=(232, 119, 34)):
+        return weighted_img(
+            draw_hough_lines(lines, self.rows, self.cols, thickness=thickness, color=color),
+            originalImage
+        )
 
-        self.drawn = out
-        self.lines = lines
-        self.lineset = lineset
-        self.vertices = vertices
+    def __call__(self, image):
+        preparedImage = self.prepare(np.copy(image))
+        allLines = self.findLines(preparedImage)
+        lines = self.deduplicate_lines(allLines)
+        return self.bakeLines(image, preparedImage, lines)
         
-        fig, ax = self.show()
-        self.pretty = save_ax_nosave(ax)
-        plt.close(fig)
-        
-    def show(self):
-        # Make a nicer annotated figure.
+    def prettyShow(self, image):
+        '''Make a nicer annotated figure.'''
         fig, ax = plt.subplots()
-        ax.imshow(self.image)
-        for l in self.lines:
+        preparedImage = self.prepare(image)
+        allLines = self.findLines(preparedImage)
+        lines = self.deduplicate_lines(allLines)
+        ax.imshow(image)
+        for l in lines:
             plotline(l, ax, lw=8, linestyle='-', color='orange', alpha=.5)
-        for l in self.originalLines:
+        for l in allLines:
             plotline(l, ax, lw=1, linestyle='-', color='magenta', alpha=.5)
-        drawPolygon(self.vertices.squeeze(), ax, alpha=.1, edgecolor='black', facecolor='orange')
+        v = self.vertices.squeeze()
+        drawPolygon(v, ax, alpha=.1, edgecolor='black', facecolor='orange')
         ax.grid(True)
-        ax.set_ylim((self.image.shape[0], 0))
-        ax.set_xlim((0, self.image.shape[1]));
+        ax.set_ylim((image.shape[0], 0))
+        ax.set_xlim((0, image.shape[1]));
         ax.set_xticks([])
         ax.set_yticks([])
         return fig, ax
+
+    def processVideo(self, inpath, outpath, audio=False, subsection=None, show=True):
+        from moviepy.editor import VideoFileClip
+        inclip = VideoFileClip(inpath)
+        if subsection is not None:
+            inclip = inclip.subclip(*subsection)
+        outclip = inclip.fl_image(self)
+        outclip.write_videofile(outpath, audio=audio)
+        if show:
+            from IPython.display import HTML
+            return HTML("""
+                <video width="960" height="540" controls loop autoplay>
+                  <source src="{0}">
+                </video>
+            """.format(outpath))
+
+
+
+def saveImage(data, path):
+    from PIL import Image
+    Image.fromarray(
+        (255.0 / data.max() * (data - data.min())).astype(np.uint8)
+    ).save(path)
