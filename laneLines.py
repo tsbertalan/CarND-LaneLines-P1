@@ -53,7 +53,7 @@ def region_of_interest(img, vertices):
     return masked_image
 
 
-def draw_lines(img, lines, color=[255, 0, 0], thickness=2):
+def draw_lines(img, xyxyVecs, color=[255, 0, 0], thickness=2):
     """
     NOTE: this is the function you might want to use as a starting point once you want to 
     average/extrapolate the line segments you detect to map out the full
@@ -70,9 +70,12 @@ def draw_lines(img, lines, color=[255, 0, 0], thickness=2):
     If you want to make the lines semi-transparent, think about combining
     this function with the weighted_img() function below
     """
-    for line in lines:
-        for x1, y1, x2, y2 in line:
+    for line in xyxyVecs:
+        x1, y1, x2, y2 = line.astype(int)
+        try:
             cv2.line(img, (x1, y1), (x2, y2), color, thickness)
+        except TypeError:
+            bk()
 
             
 def hough_lines(img, rho, theta, threshold, min_line_len, max_line_gap):
@@ -87,9 +90,9 @@ def hough_lines(img, rho, theta, threshold, min_line_len, max_line_gap):
     return lines
 
 
-def draw_hough_lines(lines, rows, cols, **kwargs):
+def draw_hough_lines(xyxyVecs, rows, cols, **kwargs):
     line_img = np.zeros((rows, cols, 3), dtype=np.uint8)
-    draw_lines(line_img, lines, **kwargs)
+    draw_lines(line_img, xyxyVecs, **kwargs)
     return line_img
 
 
@@ -239,51 +242,7 @@ def lineup(l):
         return np.array([x2, y2, x1, y1]).reshape(np.asarray(l).shape)
     else:
         return l
-  
 
-def deduplicate_lines(lines, maxabsthresh=64, horizon=.6):
-    '''Remove near-duplicates from a collection of lines.'''
-    # TODO: This could probably be replaced with something more standard like k-means.
-    def mn(v):
-        return sum(v) / len(v)
-    nl = int(lines.size / 4)
-    linelist = lines.squeeze().reshape((nl, 4))
-    lines = [lineup(np.array(extend_to_borders(l, horizon=horizon)).astype(lines.dtype)) for l in linelist]
-    lineset = []
-    for lk in lines:
-        if len(lineset) == 0:
-            lineset.append([lk, [lk]])
-        else:
-            classIndex = False
-            for i, (ljmean, ljclass) in enumerate(lineset):
-                e = max(abs(lk - ljmean).ravel())
-                if e < maxabsthresh:
-                    classIndex = i
-            if not classIndex:
-                lineset.append([lk, [lk]])
-            else:
-                lineset[classIndex][1].append(lk)
-                lineset[classIndex][0] = mn(lineset[classIndex][1])
-    # lineset = list(set([tuple(l) for l in lineset]))
-    if len(lineset) > 0:
-        out = np.stack([cl[0] for cl in lineset])
-        out = out.reshape((out.shape[0], 1, out.shape[-1])).astype(lines[0].dtype)
-        # print('Reduced from %d to %d lines.' % (len(lines), len(out)))
-        return out, lineset
-    else:
-        return np.empty((0, 1, 4)), lineset
-
-
-def plotline(l, ax, extraxy=None, **kwargs):
-    '''Pretty-plot a line on an axis.'''
-    # TODO: Make into a Line method (though I should probably just use pixel/cv2 operations instead, since I don't want to be outputting matplotlib objects instead of simple image arrays.
-    l = tovec(l)
-    x = [l[0], l[2]]
-    y = [l[1], l[3]]
-    if extraxy is not None:
-        x.append(extraxy[0])
-        y.append(extraxy[1])
-    return ax.plot(x, y, **kwargs)
 
 # TODO: I should just use cv2 functions for "plotting" my lines, so I don't need the following three functions.
 def fig2array(fig):
@@ -341,7 +300,7 @@ class Pipeline(object):
         if self.horizonRadius is None:
             calibration = .04
             # Calibrate for a horizonRadius of `calibration` at horizon=.6
-            x1 = (1 - horizon) * (.5 - calibration) / .4
+            x1 = (1 - self.horizon) * (.5 - calibration) / .4
             self.horizonRadius = .5 - x1
         x = self.cols
         y = self.rows
@@ -359,17 +318,39 @@ class Pipeline(object):
         return out
 
     def findLines(self, preparedImage):
-        lines = hough_lines(preparedImage, 20, np.pi / 120, 42, 50, 20)
-        assert lines is not None
+        lines = [LineSegment(l) for l in hough_lines(preparedImage, 20, np.pi / 120, 42, 50, 20)]
         return lines
 
-    def deduplicate_lines(self, allLines):
-        lines, _lineset = deduplicate_lines(allLines, horizon=self.horizon)
-        return lines
+    def deduplicate_lines(self, lines,  maxabsthresh=64):
+        '''Remove near-duplicates from a collection of lines.'''
+        # TODO: This could probably be replaced with something more standard like k-means.
+        def mn(v):
+            return sum(v) / len(v)
+        nl = len(lines)
+        lines = [
+            lineup(np.array(extend_to_borders(l.xyxy, horizon=self.horizon)).astype(l.xyxy.dtype))
+            for l in lines
+        ]
+        lineset = []
+        for lk in lines:
+            if len(lineset) == 0:
+                lineset.append([lk, [lk]])
+            else:
+                classIndex = False
+                for i, (ljmean, ljclass) in enumerate(lineset):
+                    e = max(abs(lk - ljmean).ravel())
+                    if e < maxabsthresh:
+                        classIndex = i
+                if not classIndex:
+                    lineset.append([lk, [lk]])
+                else:
+                    lineset[classIndex][1].append(lk)
+                    lineset[classIndex][0] = mn(lineset[classIndex][1])
+        return [LineSegment(cl[0]) for cl in lineset]
 
     def bakeLines(self, originalImage, preparedImage, lines, thickness=12, color=(232, 119, 34)):
         return weighted_img(
-            draw_hough_lines(lines, self.rows, self.cols, thickness=thickness, color=color),
+            draw_hough_lines([l.xyxy for l in lines], self.rows, self.cols, thickness=thickness, color=color),
             originalImage
         )
 
@@ -387,9 +368,9 @@ class Pipeline(object):
         lines = self.deduplicate_lines(allLines)
         ax.imshow(image)
         for l in lines:
-            plotline(l, ax, lw=8, linestyle='-', color='orange', alpha=.5)
+            l.plotline(ax, lw=8, linestyle='-', color='orange', alpha=.5)
         for l in allLines:
-            plotline(l, ax, lw=1, linestyle='-', color='magenta', alpha=.5)
+            l.plotline(ax, lw=1, linestyle='-', color='magenta', alpha=.5)
         v = self.vertices.squeeze()
         drawPolygon(v, ax, alpha=.1, edgecolor='black', facecolor='orange')
         ax.grid(True)
@@ -421,3 +402,51 @@ def saveImage(data, path):
     Image.fromarray(
         (255.0 / data.max() * (data - data.min())).astype(np.uint8)
     ).save(path)
+
+
+class LineSegment(object):
+    '''Math and plotting methods for lines.'''
+
+    def __init__(self, xyxy):
+
+        xyxy = tovec(xyxy)
+        x1, y1, x2, y2 = xyxy
+        if y1 > y2:
+            xyxy = np.array([x2, y2, x1, y1]).reshape(np.asarray(xyxy).shape)
+
+        self.xyxy = xyxy
+
+        self.m = m(xyxy)
+        self.b = b(xyxy)
+
+    def y(self, x):
+        return self.m * x + b
+
+    def x(self, y):
+        return (y - self.b) / self.m
+
+    def extendToHorizontalBorders(self, top=None, bottom=0):
+        if top is None:
+            top = self.rows
+        if self.xyxy[1] > bottom:
+            self.xyxy[0] = self.x(bottom)
+            self.xyxy[1] = bottom
+        if self.xyxy[3] < top:
+            self.xyxy[2] = self.x(top)
+            self.xyxy[3] = top
+
+    def plotline(self, ax, extraxy=None, **kwargs):
+        '''Pretty-plot a line on an axis.'''
+        # TODO: Make into a Line method (though I should probably just use pixel/cv2 operations instead, since I don't want to be outputting matplotlib objects instead of simple image arrays.
+        l = tovec(self.xyxy)
+        x = [l[0], l[2]]
+        y = [l[1], l[3]]
+        if extraxy is not None:
+            x.append(extraxy[0])
+            y.append(extraxy[1])
+        return ax.plot(x, y, **kwargs)
+
+
+def bk():
+    from IPython.core.debugger import set_trace
+    set_trace()
