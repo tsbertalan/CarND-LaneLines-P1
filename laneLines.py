@@ -36,6 +36,9 @@ def region_of_interest(img, vertices):
     formed from `vertices`. The rest of the image is set to black.
     """
     # defining a blank mask to start with
+    vs = vertices.shape
+    if len(vs) == 2:
+        vertices= vertices.reshape((1, vs[0], vs[1]))
     mask = np.zeros_like(img)   
     
     # defining a 3 channel or 1 channel color to fill the mask with depending on the input image
@@ -72,10 +75,7 @@ def draw_lines(img, xyxyVecs, color=[255, 0, 0], thickness=2):
     """
     for line in xyxyVecs:
         x1, y1, x2, y2 = line.astype(int)
-        try:
-            cv2.line(img, (x1, y1), (x2, y2), color, thickness)
-        except TypeError:
-            bk()
+        cv2.line(img, (x1, y1), (x2, y2), color, thickness)
 
             
 def hough_lines(img, rho, theta, threshold, min_line_len, max_line_gap):
@@ -208,33 +208,6 @@ def vertline(x):
     return [x, 0, x, 1]
 
 
-def extend_to_borders(line, bottom=None, top=540, left=0, right=960, horizon=.6):
-    '''Find two points on a line that intersect the rectangle boundaries.'''
-    # TODO: Delete/disuse or fold this into the upcoming Line class.
-    if bottom is None:
-        bottom = int(540 * horizon)
-    line = tovec(line)
-    ml = m(line)
-    bl = b(line)
-    
-    out = []
-    for x in left, right:
-        y = ml * x + bl
-        if inrect(x, y, bottom=bottom, top=top, left=left, right=right):
-            out.extend((x, y))
-    for y in bottom, top:
-        x = (y - bl) / ml
-        if inrect(x, y, bottom=bottom, top=top, left=left, right=right):
-            out.extend((x, y))
-    if len(out) == 0:
-        warn('Failed to find border points for input line %s.' % (line,))
-        return line
-    if len(out) == 2:
-        out.extend(line[:2])
-        warn('Failed to find two border points for input line %s; suppplementing to %s.' % (line, out))
-    return out
-
-
 def lineup(l):
     '''Ensure an x1y1x2y2-form line starts with its lower (in y-coord) point.'''
     x1, y1, x2, y2 = tovec(l)
@@ -304,9 +277,11 @@ class Pipeline(object):
             self.horizonRadius = .5 - x1
         x = self.cols
         y = self.rows
-        return np.array([[
-                    (0, y * (1. - self.hoodClearance)), (x * (.5 - self.horizonRadius), y * self.horizon),
-                    (x * (.5 + self.horizonRadius), y * self.horizon), (x, y * (1. - self.hoodClearance))]
+        return np.array([
+                    (0, y * (1. - self.hoodClearance)), 
+                    (x * (.5 - self.horizonRadius), y * self.horizon),
+                    (x * (.5 + self.horizonRadius), y * self.horizon), 
+                    (x, y * (1. - self.hoodClearance))
                    ], dtype=np.int32)
 
     def prepare(self, image):
@@ -328,7 +303,7 @@ class Pipeline(object):
             return sum(v) / len(v)
         nl = len(lines)
         lines = [
-            lineup(np.array(extend_to_borders(l.xyxy, horizon=self.horizon)).astype(l.xyxy.dtype))
+            lineup(l.xyxy)
             for l in lines
         ]
         lineset = []
@@ -346,7 +321,11 @@ class Pipeline(object):
                 else:
                     lineset[classIndex][1].append(lk)
                     lineset[classIndex][0] = mn(lineset[classIndex][1])
-        return [LineSegment(cl[0]) for cl in lineset]
+        deduplicatedLines = [LineSegment(cl[0]) for cl in lineset]
+        vy = self.vertices[:, 1]
+        for l in deduplicatedLines:
+            l.extendToHorizontalBorders(top=max(vy), bottom=min(vy))
+        return deduplicatedLines
 
     def bakeLines(self, originalImage, preparedImage, lines, thickness=12, color=(232, 119, 34)):
         return weighted_img(
@@ -396,7 +375,6 @@ class Pipeline(object):
             """.format(outpath))
 
 
-
 def saveImage(data, path):
     from PIL import Image
     Image.fromarray(
@@ -426,6 +404,8 @@ class LineSegment(object):
         return (y - self.b) / self.m
 
     def extendToHorizontalBorders(self, top=None, bottom=0):
+        if self.m == 0:
+            return # Can't extend up or down!
         if top is None:
             top = self.rows
         if self.xyxy[1] > bottom:
