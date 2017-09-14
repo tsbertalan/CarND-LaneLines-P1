@@ -127,139 +127,6 @@ def drawPolygon(vertices, ax=None, **kwargs):
     return ax.add_patch(Polygon(vertices, True, **kwargs))
 
 
-def tovec(l):
-    return np.asarray(l).ravel()
-
-
-def vecDec(f):
-    '''Decorator to ensure ndarray input.'''
-    def wr(l):
-        l = tovec(l)
-        return f(l)
-    return wr
-
-
-def inrect(x, y, bottom=0, top=540, left=0, right=960):
-    '''Is a point in the given rectangle?'''
-    return (x >= left and x <= right and y >= bottom and y <= top)
-
-
-@vecDec
-def m(l):
-    '''Get slope from x1y1x2y2 form.'''
-    return (l[3] - l[1]) / (l[2] - l[0]) 
-
-
-@vecDec
-def b(l):
-    '''Get intercept from x1y1x2y2 form.'''
-    return (l[1] - m(l) * l[0])
-
-
-'''Check whether line is vertical.'''
-isvert = lambda l: l[0] == l[2]
-
-
-def intersection(l1, l2):
-    '''Find intersection of two lines.'''
-    # TODO: Probably should delete this.
-    l1 = tovec(l1)
-    l2 = tovec(l2)
-
-    def intersectionVert(l, lv):
-        x = lv[0]
-        bl = b(l)
-        ml = m(l)
-        return x, ml * x + bl
-
-    def intersectionHorz(l, lh):
-        y = lh[1]
-        bl = b(l)
-        ml = m(l)
-        return (y - bl) / ml, y
-
-    try:
-        if isvert(l1):
-            return intersectionVert(l2, l1)
-        if isvert(l2):
-            return intersectionVert(l1, l2)
-    except IndexError as e:
-        if len(l1) < 4:
-            x = l1[0]
-            return([x, 0, x, 1], l2)
-        else:
-            x = l2[0]
-            return(l1, [x, 0, x, 1])
-    
-    mk = [m(l) for l in (l1, l2)]
-    bk = [b(l) for l in (l1, l2)]
-    
-    x = (bk[1] - bk[0]) / (mk[0] - mk[1])
-    y = mk[0] * x + bk[0]
-    return float(x), float(y)
-
-
-# TODO: I don't think I use these anywhere; probably delete them.
-def horzline(y):
-    return [0, y, 1, y]
-
-
-def vertline(x):
-    return [x, 0, x, 1]
-
-
-def lineup(l):
-    '''Ensure an x1y1x2y2-form line starts with its lower (in y-coord) point.'''
-    x1, y1, x2, y2 = tovec(l)
-    if y1 > y2:
-        return np.array([x2, y2, x1, y1]).reshape(np.asarray(l).shape)
-    else:
-        return l
-
-
-# TODO: I should just use cv2 functions for "plotting" my lines, so I don't need the following three functions.
-def fig2array(fig):
-    '''Rasterize a matplotlib figure.'''
-    fig.tight_layout(pad=0)
-    fig.canvas.draw()
-    data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
-    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-    return data
-
-
-def fig2data (fig):
-    """
-    @brief Convert a Matplotlib figure to a 4D numpy array with RGBA channels and return it
-    @param fig a matplotlib figure
-    @return a numpy 3D array of RGBA values
-    """
-    # draw the renderer
-    fig.canvas.draw ()
- 
-    # Get the RGBA buffer from the figure
-    h, w = fig.canvas.get_width_height()
-    buf = np.fromstring (fig.canvas.tostring_argb(), dtype=np.uint8)
-    buf.shape = (w, h, 4)
- 
-    # canvas.tostring_argb give pixmap in ARGB mode. Roll the ALPHA channel to have it in RGBA mode
-    buf = np.roll (buf, 3, axis=2)
-    return buf
-
-import io
-def save_ax_nosave(ax, **kwargs):
-    '''Rasterize a matplotlib axis.'''
-    ax.axis("off")
-    ax.figure.canvas.draw()
-    trans = ax.figure.dpi_scale_trans.inverted() 
-    bbox = ax.bbox.transformed(trans)
-    buff = io.BytesIO()
-    plt.savefig(buff, format="png", dpi=ax.figure.dpi, bbox_inches=bbox, **kwargs)
-    ax.axis("on")
-    buff.seek(0)
-    im = plt.imread(buff)
-    return im
-
-
 class Pipeline(object):
     '''Pipeline for lane-line-finding.'''
     
@@ -302,12 +169,9 @@ class Pipeline(object):
         def mn(v):
             return sum(v) / len(v)
         nl = len(lines)
-        lines = [
-            lineup(l.xyxy)
-            for l in lines
-        ]
         lineset = []
         for lk in lines:
+            lk = lk.xyxy
             if len(lineset) == 0:
                 lineset.append([lk, [lk]])
             else:
@@ -387,15 +251,15 @@ class LineSegment(object):
 
     def __init__(self, xyxy):
 
-        xyxy = tovec(xyxy)
+        # Ensure line segment starts with its lower point.
+        xyxy = np.asarray(xyxy).ravel()
         x1, y1, x2, y2 = xyxy
         if y1 > y2:
             xyxy = np.array([x2, y2, x1, y1]).reshape(np.asarray(xyxy).shape)
 
         self.xyxy = xyxy
-
-        self.m = m(xyxy)
-        self.b = b(xyxy)
+        self.m = (y2 - y1) / (x2 - x1) 
+        self.b = y1 - self.m * x1
 
     def y(self, x):
         return self.m * x + b
@@ -417,8 +281,7 @@ class LineSegment(object):
 
     def plotline(self, ax, extraxy=None, **kwargs):
         '''Pretty-plot a line on an axis.'''
-        # TODO: Make into a Line method (though I should probably just use pixel/cv2 operations instead, since I don't want to be outputting matplotlib objects instead of simple image arrays.
-        l = tovec(self.xyxy)
+        l = self.xyxy
         x = [l[0], l[2]]
         y = [l[1], l[3]]
         if extraxy is not None:
