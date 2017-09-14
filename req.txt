@@ -6,4 +6,4 @@ jupyter
 opencv-python
 pillow
 moviepy
-
+sklearn

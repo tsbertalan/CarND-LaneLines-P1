@@ -72,6 +72,8 @@ def draw_lines(img, xyxyVecs, color=[255, 0, 0], thickness=2):
     Lines are drawn on the image inplace (mutates the image).
     If you want to make the lines semi-transparent, think about combining
     this function with the weighted_img() function below
+
+    Color is RGB.
     """
     for line in xyxyVecs:
         x1, y1, x2, y2 = line.astype(int)
@@ -110,10 +112,10 @@ def weighted_img(img, initial_img, alpha=0.8, beta=1., gamma=0.):
     
     The result image is computed as follows:
     
-    initial_img * alpha + img * beta + gamma
+    initial_img * beta + img * alpha + gamma
     NOTE: initial_img and img must be the same shape!
     """
-    return cv2.addWeighted(img, alpha, initial_img, beta, gamma)
+    return cv2.addWeighted(initial_img, beta, img, alpha, gamma)
 
 
 def drawPolygon(vertices, ax=None, **kwargs):
@@ -130,10 +132,30 @@ def drawPolygon(vertices, ax=None, **kwargs):
 class Pipeline(object):
     '''Pipeline for lane-line-finding.'''
     
-    def __init__(self, horizon=.6, horizonRadius=None, hoodClearance=0):
+    def __init__(self, 
+        horizon=.6, horizonRadius=None, hoodClearance=0,
+        rho=20, theta=np.pi/120, houghThreshold=64, min_line_len=50, max_line_gap=20,
+        minAbsSlope=.5,
+        smoothing=True, nsmooth=12,
+        ):
         self.horizon = horizon
         self.horizonRadius = horizonRadius
         self.hoodClearance = hoodClearance
+
+        self.rho = rho
+        self.theta = theta
+        self.houghThreshold = houghThreshold
+        self.min_line_len = min_line_len
+        self.max_line_gap = max_line_gap
+
+        self.minAbsSlope = minAbsSlope
+
+        self.debug = False
+        self.debugThickness = 4
+        self.debugColor = [0, 255, 0]
+
+        self.smoothing = smoothing
+        self.nsmooth = nsmooth
 
     @property
     def vertices(self):
@@ -160,58 +182,112 @@ class Pipeline(object):
         return out
 
     def findLines(self, preparedImage):
-        lines = [LineSegment(l) for l in hough_lines(preparedImage, 20, np.pi / 120, 42, 50, 20)]
-        return lines
+        return [
+            LineSegment(l)
+            for l in hough_lines(
+                preparedImage, self.rho, self.theta, self.houghThreshold,
+                self.min_line_len, self.max_line_gap
+            )
+        ]
 
-    def deduplicate_lines(self, lines,  maxabsthresh=64):
+    def checkLine(self, l):
+        return np.abs(l.m) >= self.minAbsSlope and np.abs(l.m) != np.inf
+
+    def deduplicate_lines(self, lines):
         '''Remove near-duplicates from a collection of lines.'''
-        # TODO: This could probably be replaced with something more standard like k-means.
-        def mn(v):
-            return sum(v) / len(v)
-        nl = len(lines)
-        lineset = []
-        for lk in lines:
-            lk = lk.xyxy
-            if len(lineset) == 0:
-                lineset.append([lk, [lk]])
-            else:
-                classIndex = False
-                for i, (ljmean, ljclass) in enumerate(lineset):
-                    e = max(abs(lk - ljmean).ravel())
-                    if e < maxabsthresh:
-                        classIndex = i
-                if not classIndex:
-                    lineset.append([lk, [lk]])
-                else:
-                    lineset[classIndex][1].append(lk)
-                    lineset[classIndex][0] = mn(lineset[classIndex][1])
-        deduplicatedLines = [LineSegment(cl[0]) for cl in lineset]
-        vy = self.vertices[:, 1]
-        for l in deduplicatedLines:
-            l.extendToHorizontalBorders(top=max(vy), bottom=min(vy))
+        if len(lines) > 1:
+            from sklearn.cluster import KMeans as ClusterFinder
+            points = [
+                (l.m, l.b)
+                for l in lines
+                if self.checkLine(l)
+            ]
+            if len(points) <= 1:
+                return self.deduplicate_lines([LineSegment(mb=pt) for pt in points])
+            points = np.vstack(points)
+            clusterFinder = ClusterFinder(n_clusters=2, n_jobs=1)
+            try:
+                clusterFinder.fit(points)
+            except ValueError:
+                bk()
+            deduplicatedLines = [
+                LineSegment(xyxy=None, mb=mb)
+                for mb in clusterFinder.cluster_centers_
+            ]
+        else:
+            deduplicatedLines = [l.copy() for l in lines]
+
+        # Ensure that the up-sloping line is always second.
+        if len(deduplicatedLines) == 2:
+            if deduplicatedLines[0].m > deduplicatedLines[1].m:
+                deduplicatedLines = deduplicatedLines[::-1]
+
         return deduplicatedLines
 
-    def bakeLines(self, originalImage, preparedImage, lines, thickness=12, color=(232, 119, 34)):
+    def bakeLines(self, originalImage, lines, thickness=12, color=(232, 119, 34), alpha=1):
         return weighted_img(
             draw_hough_lines([l.xyxy for l in lines], self.rows, self.cols, thickness=thickness, color=color),
-            originalImage
+            originalImage,
+            alpha=alpha
         )
 
-    def __call__(self, image):
+    def __call__(self, image, lineHistory=None):
+        # Preprocess the image.
         preparedImage = self.prepare(np.copy(image))
+
+        # Find the lines.
         allLines = self.findLines(preparedImage)
         lines = self.deduplicate_lines(allLines)
-        return self.bakeLines(image, preparedImage, lines)
+        if lineHistory is not None:
+            if len(lines) == 2:
+                lineHistory.append(lines)
+            mbs = [
+                [
+                    (lp[k].m, lp[k].b)
+                    for lp in lineHistory
+                ]
+                for k in range(2)
+            ]
+            ms = [np.mean([mb[0] for mb in mbsk]) for mbsk in mbs]
+            bs = [np.mean([mb[1] for mb in mbsk]) for mbsk in mbs]
+            lines = [
+                LineSegment(mb=(m, b))
+                for (m, b) in zip(ms, bs)
+            ]
+
+        self.recutLines(lines)
+
+        # Draw the lines.
+        baked = np.copy(image)
+        if self.debug:
+            filteredLines = [
+                l for l in allLines
+                if self.checkLine(l)
+            ]
+            baked = self.bakeLines(baked, filteredLines, color=self.debugColor, thickness=self.debugThickness)
+        baked = self.bakeLines(baked, lines, alpha=.5)
+        return baked
+
+    def getLines(self, image):
+        preparedImage = self.prepare(np.copy(image))
+        allLines = self.findLines(preparedImage)
+        return self.recutLines(self.deduplicate_lines(allLines))
+
+    def recutLines(self, lines):
+        vy = self.vertices[:, 1]
+        for l in lines:
+            l.extendToHorizontalBorders(top=max(vy), bottom=min(vy))
+        return lines
         
     def prettyShow(self, image):
         '''Make a nicer annotated figure.'''
         fig, ax = plt.subplots()
         preparedImage = self.prepare(image)
         allLines = self.findLines(preparedImage)
-        lines = self.deduplicate_lines(allLines)
+        lines = self.recutLines(self.deduplicate_lines(allLines))
         ax.imshow(image)
         for l in lines:
-            l.plotline(ax, lw=8, linestyle='-', color='orange', alpha=.5)
+            l.plotline(ax, lw=8, linestyle='-', color='orange', alpha=.9)
         for l in allLines:
             l.plotline(ax, lw=1, linestyle='-', color='magenta', alpha=.5)
         v = self.vertices.squeeze()
@@ -228,7 +304,14 @@ class Pipeline(object):
         inclip = VideoFileClip(inpath)
         if subsection is not None:
             inclip = inclip.subclip(*subsection)
-        outclip = inclip.fl_image(self)
+        if self.smoothing:
+            from collections import deque
+            lastkedges = deque(maxlen=self.nsmooth)
+            def f(image):
+                return self(image, lineHistory=lastkedges)
+        else:
+            f = self
+        outclip = inclip.fl_image(f)
         outclip.write_videofile(outpath, audio=audio)
         if show:
             from IPython.display import HTML
@@ -249,35 +332,52 @@ def saveImage(data, path):
 class LineSegment(object):
     '''Math and plotting methods for lines.'''
 
-    def __init__(self, xyxy):
+    def __init__(self, xyxy=None, mb=None):
 
-        # Ensure line segment starts with its lower point.
-        xyxy = np.asarray(xyxy).ravel()
+        if xyxy is not None:
+            self.xyxy = np.asarray(xyxy).ravel()
+            x1, y1, x2, y2 = self.xyxy
+            self.m = (y2 - y1) / (x2 - x1) 
+            self.b = y1 - self.m * x1
+        elif mb is not None:
+            m, b = mb
+            assert m != np.inf, 'TODO: Need to do an r-theta parameterization.'
+            self.m = m
+            self.b = b
+            x1 = 1
+            x2 = 2
+            y1 = self.y(x1)
+            y2 = self.y(x2)
+            self.xyxy = np.array([x1, y1, x2, y2])
+        else:
+            bk()
+            raise ValueError('Need to pass xyxy or mb')
+        self._lineup()
+
+    def copy(self):
+        return LineSegment(self.xyxy)
+
+    def _lineup(self):
+        '''Ensure line segment starts with its lower point.'''
+        xyxy = np.asarray(self.xyxy).ravel()
         x1, y1, x2, y2 = xyxy
         if y1 > y2:
             xyxy = np.array([x2, y2, x1, y1]).reshape(np.asarray(xyxy).shape)
-
         self.xyxy = xyxy
-        self.m = (y2 - y1) / (x2 - x1) 
-        self.b = y1 - self.m * x1
 
     def y(self, x):
-        return self.m * x + b
+        return self.m * x + self.b
 
     def x(self, y):
         return (y - self.b) / self.m
 
-    def extendToHorizontalBorders(self, top=None, bottom=0):
+    def extendToHorizontalBorders(self, top, bottom):
         if self.m == 0:
             return # Can't extend up or down!
-        if top is None:
-            top = self.rows
-        if self.xyxy[1] > bottom:
-            self.xyxy[0] = self.x(bottom)
-            self.xyxy[1] = bottom
-        if self.xyxy[3] < top:
-            self.xyxy[2] = self.x(top)
-            self.xyxy[3] = top
+        self.xyxy[0] = self.x(bottom)
+        self.xyxy[1] = bottom
+        self.xyxy[2] = self.x(top)
+        self.xyxy[3] = top
 
     def plotline(self, ax, extraxy=None, **kwargs):
         '''Pretty-plot a line on an axis.'''
