@@ -98,9 +98,15 @@ def draw_hough_lines(xyxyVecs, rows, cols, **kwargs):
     return line_img
 
 
-def fake_color(bw, color=[1., 0, 0]):
+def fake_color(bw, color=[1., 1., 1.]):
     r, g, b = color
     return np.dstack((r * bw, b * bw, g * bw)).astype(bw.dtype)
+
+
+def toColorIfBW(bw, color=[1., 1., 1.]):
+    if len(bw.shape) == 2 or bw.shape[2] == 1:
+        bw = fake_color(bw)
+    return bw
 
 
 def weighted_img(img, initial_img, alpha=0.8, beta=1., gamma=0.):
@@ -115,7 +121,7 @@ def weighted_img(img, initial_img, alpha=0.8, beta=1., gamma=0.):
     initial_img * beta + img * alpha + gamma
     NOTE: initial_img and img must be the same shape!
     """
-    return cv2.addWeighted(initial_img, beta, img, alpha, gamma)
+    return cv2.addWeighted(toColorIfBW(initial_img), beta, toColorIfBW(img), alpha, gamma)
 
 
 def drawPolygon(vertices, ax=None, **kwargs):
@@ -129,13 +135,17 @@ def drawPolygon(vertices, ax=None, **kwargs):
     return ax.add_patch(Polygon(vertices, True, **kwargs))
 
 
+def pixelwiseMax(*imgs):
+    return np.stack(imgs).max(axis=0)
+
+
 class Pipeline(object):
     '''Pipeline for lane-line-finding.'''
     
     def __init__(self, 
         horizon=.6, horizonRadius=None, hoodClearance=0,
         rho=20, theta=np.pi/120, houghThreshold=64, min_line_len=50, max_line_gap=20,
-        minAbsSlope=.5,
+        minAbsSlope=.5, maxAbsSlope=2,
         smoothing=True, nsmooth=12,
         ):
         self.horizon = horizon
@@ -149,6 +159,7 @@ class Pipeline(object):
         self.max_line_gap = max_line_gap
 
         self.minAbsSlope = minAbsSlope
+        self.maxAbsSlope = maxAbsSlope
 
         self.debug = False
         self.debugThickness = 4
@@ -175,9 +186,13 @@ class Pipeline(object):
 
     def prepare(self, image):
         self.rows, self.cols = image.shape[:2]
-        out = grayscale(image)
-        out = gaussian_blur(out, 5)
-        out = canny(out, 50, 150)
+        rgb = []
+        for k in range(3):
+            out = image[:, :, k]
+            out = gaussian_blur(out, 5)
+            out = canny(out, 50, 150)
+            rgb.append(out)
+        out = pixelwiseMax(*rgb)
         out = region_of_interest(out, self.vertices)
         return out
 
@@ -191,7 +206,11 @@ class Pipeline(object):
         ]
 
     def checkLine(self, l):
-        return np.abs(l.m) >= self.minAbsSlope and np.abs(l.m) != np.inf
+        return (
+            np.abs(l.m) >= self.minAbsSlope
+            and np.abs(l.m) <= self.maxAbsSlope 
+            and np.abs(l.m) != np.inf
+        )
 
     def deduplicate_lines(self, lines):
         '''Remove near-duplicates from a collection of lines.'''
@@ -258,13 +277,20 @@ class Pipeline(object):
         self.recutLines(lines)
 
         # Draw the lines.
-        baked = np.copy(image)
         if self.debug:
+            baked = np.copy(preparedImage)
             filteredLines = [
                 l for l in allLines
                 if self.checkLine(l)
             ]
             baked = self.bakeLines(baked, filteredLines, color=self.debugColor, thickness=self.debugThickness)
+
+            # Put some info in the top left corner.
+            infoImg = padImg(self.mbDist(filteredLines, lines)[:, :, :3], baked.shape)
+            baked = weighted_img(infoImg, baked, alpha=1)
+
+        else:
+            baked = np.copy(image)
         baked = self.bakeLines(baked, lines, alpha=.5)
         return baked
 
@@ -320,6 +346,61 @@ class Pipeline(object):
                   <source src="{0}">
                 </video>
             """.format(outpath))
+
+    def mbDist(self, lines, linesdedup):
+        '''Make a plot with some extra information to put in the corner of the video.'''
+        import matplotlib.pyplot as plt
+        import matplotlib as mpl
+        for k in 'xtick', 'ytick', 'axes':
+            mpl.rc(k, labelsize=10)
+        import numpy as np
+        l2p = lambda ls: np.stack([
+                (l.m, l.b)
+                for l in ls
+                if self.checkLine(l)
+            ])
+        fig, ax = plt.subplots(figsize=(4, 3))
+        ax.scatter(l2p(lines)[:, 0], l2p(lines)[:, 1], color='yellow', s=24)
+        ax.scatter(l2p(linesdedup)[:, 0], l2p(linesdedup)[:, 1], color='red', s=128, marker='*')
+        ax.set_xlabel('slope $m$', color='white'); ax.set_ylabel('intercept $b$', color='white')
+
+        ax.set_xlim(-self.maxAbsSlope, self.maxAbsSlope)
+        ax.set_ylim(-2000, 2000)
+        ax.patch.set_facecolor('black')
+        fig.patch.set_facecolor('black')
+
+        fig.tight_layout()
+        out = fig2data(fig)
+        plt.close(fig)
+        return out
+
+
+def padImg(small, targetShape, padValue=0):
+    if len(targetShape) == 2:
+        targetShape = list(targetShape)
+        targetShape.append(3)
+    out = np.ones(targetShape, dtype=small.dtype) * padValue
+    out[:small.shape[0], :small.shape[1], :] = toColorIfBW(small)
+    return out
+
+
+def fig2data(fig):
+    """
+    @brief Convert a Matplotlib figure to a 4D numpy array with RGBA channels and return it
+    @param fig a matplotlib figure
+    @return a numpy 3D array of RGBA values
+    """
+    # draw the renderer
+    fig.canvas.draw ()
+ 
+    # Get the RGBA buffer from the figure
+    h, w = fig.canvas.get_width_height()
+    buf = np.fromstring(fig.canvas.tostring_argb(), dtype=np.uint8)
+    buf.shape = (w, h, 4)
+ 
+    # canvas.tostring_argb give pixmap in ARGB mode. Roll the ALPHA channel to have it in RGBA mode
+    buf = np.roll(buf, 3, axis=2)
+    return buf
 
 
 def saveImage(data, path):
