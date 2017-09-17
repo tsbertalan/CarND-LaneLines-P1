@@ -6,6 +6,9 @@ import numpy as np
 import cv2
 from warnings import warn
 
+from collections import deque
+from sklearn.cluster import KMeans as ClusterFinder
+
 
 def grayscale(img):
     """Applies the Grayscale transform
@@ -80,13 +83,16 @@ def draw_lines(img, xyxyVecs, color=[255, 0, 0], thickness=2):
         cv2.line(img, (x1, y1), (x2, y2), color, thickness)
 
             
-def hough_lines(img, rho, theta, threshold, min_line_len, max_line_gap):
+def hough_lines(img, rho, theta, threshold, minLineLen, maxLineGap):
     """
     `img` should be the output of a Canny transform.
         
     Returns hough lines as starting and ending points [x1, y1, x2, y2].
     """
-    lines = cv2.HoughLinesP(img, rho, theta, threshold, np.array([]), minLineLength=min_line_len, maxLineGap=max_line_gap)
+    lines = cv2.HoughLinesP(
+        img, rho, theta, threshold, np.array([]), 
+        minLineLength=minLineLen, maxLineGap=maxLineGap
+        )
     if lines is None:
         lines = np.empty((0, 1, 4))
     return lines
@@ -103,7 +109,7 @@ def fake_color(bw, color=[1., 1., 1.]):
     return np.dstack((r * bw, b * bw, g * bw)).astype(bw.dtype)
 
 
-def toColorIfBW(bw, color=[1., 1., 1.]):
+def to_color_if_bw(bw, color=[1., 1., 1.]):
     if len(bw.shape) == 2 or bw.shape[2] == 1:
         bw = fake_color(bw)
     return bw
@@ -121,10 +127,10 @@ def weighted_img(img, initial_img, alpha=0.8, beta=1., gamma=0.):
     initial_img * beta + img * alpha + gamma
     NOTE: initial_img and img must be the same shape!
     """
-    return cv2.addWeighted(toColorIfBW(initial_img), beta, toColorIfBW(img), alpha, gamma)
+    return cv2.addWeighted(to_color_if_bw(initial_img), beta, to_color_if_bw(img), alpha, gamma)
 
 
-def drawPolygon(vertices, ax=None, **kwargs):
+def draw_polygon(vertices, ax=None, **kwargs):
     for (k, v) in dict(edgecolor='blue', lw=4, facecolor='none', linestyle='--').items():
         if k not in kwargs:
             kwargs[k] = v
@@ -135,7 +141,7 @@ def drawPolygon(vertices, ax=None, **kwargs):
     return ax.add_patch(Polygon(vertices, True, **kwargs))
 
 
-def pixelwiseMax(*imgs):
+def pixelwise_max(*imgs):
     return np.stack(imgs).max(axis=0)
 
 
@@ -144,19 +150,54 @@ class Pipeline(object):
     
     def __init__(self, 
         horizon=.6, horizonRadius=None, hoodClearance=0,
-        rho=20, theta=np.pi/120, houghThreshold=64, min_line_len=50, max_line_gap=20,
+        gaussianRadius=5,
+        lowCannyThreshold=50, highCannyThreshold=150,
+        rho=20, theta=np.pi/120, houghThreshold=64, minLineLen=50, maxLineGap=20,
         minAbsSlope=.5, maxAbsSlope=2,
-        smoothing=True, nsmooth=12,
         ):
+        '''
+        Parameters
+        ----------
+        horizon : float, optional
+            How far down on the image the top edge of the search region trapezoid
+            should be. Specified as a number in (0.0, 1.0),
+            where 0.0 is at the top of the image and 1.0, the bottom.
+        hozironRadius : float, optional
+            Half-width of the top edge of the search region trapezoid. in units of (sub)pixels.
+        gaussianRadius : int, optional
+            Diameter of Gaussian pre-smoothing.
+        lowCannyThreshold : int, optional
+        highCannyThreshold : int, optional
+            Hysteresis thresholds for Canny edge detection.
+        rho : float, optional
+            Radius increment for assembling the Hough accumulator array. In units of pixels.
+        theta : float, optional
+            Angle increment for assembling the Hough accumulator array. In units of radians.
+        houghThreshold : int, optional
+            Minimum number of accumulated Hough votes for inclusion.
+        minLineLeng : float, optional
+            "Minimum length of line. Line segments shorter than this are rejected."
+        maxLineGap : float, optional
+            "Maximum allowed gap between line segments to treat them as single line."
+        minAbsSlope : float, optional
+            Lower threshold on line slope for filtering Hough candidates
+        maxAbsSlope : float, optional
+            Upper threshold on line slope for filtering Hough candidates
+        '''
+
         self.horizon = horizon
         self.horizonRadius = horizonRadius
         self.hoodClearance = hoodClearance
 
+        self.gaussianRadius = gaussianRadius
+        self.lowCannyThreshold = lowCannyThreshold
+        self.highCannyThreshold = highCannyThreshold
+
         self.rho = rho
         self.theta = theta
         self.houghThreshold = houghThreshold
-        self.min_line_len = min_line_len
-        self.max_line_gap = max_line_gap
+        self.minLineLen = minLineLen
+        self.maxLineGap = maxLineGap
 
         self.minAbsSlope = minAbsSlope
         self.maxAbsSlope = maxAbsSlope
@@ -164,9 +205,6 @@ class Pipeline(object):
         self.debug = False
         self.debugThickness = 4
         self.debugColor = [0, 255, 0]
-
-        self.smoothing = smoothing
-        self.nsmooth = nsmooth
 
     @property
     def vertices(self):
@@ -189,23 +227,23 @@ class Pipeline(object):
         rgb = []
         for k in range(3):
             out = image[:, :, k]
-            out = gaussian_blur(out, 5)
-            out = canny(out, 50, 150)
+            out = gaussian_blur(out, self.gaussianRadius)
+            out = canny(out, self.lowCannyThreshold, self.highCannyThreshold)
             rgb.append(out)
-        out = pixelwiseMax(*rgb)
+        out = pixelwise_max(*rgb)
         out = region_of_interest(out, self.vertices)
         return out
 
-    def findLines(self, preparedImage):
+    def find_lines(self, preparedImage):
         return [
             LineSegment(l)
             for l in hough_lines(
                 preparedImage, self.rho, self.theta, self.houghThreshold,
-                self.min_line_len, self.max_line_gap
+                self.minLineLen, self.maxLineGap
             )
         ]
 
-    def checkLine(self, l):
+    def check_line(self, l):
         return (
             np.abs(l.m) >= self.minAbsSlope
             and np.abs(l.m) <= self.maxAbsSlope 
@@ -215,20 +253,16 @@ class Pipeline(object):
     def deduplicate_lines(self, lines):
         '''Remove near-duplicates from a collection of lines.'''
         if len(lines) > 1:
-            from sklearn.cluster import KMeans as ClusterFinder
+            
             points = [
                 (l.m, l.b)
                 for l in lines
-                if self.checkLine(l)
+                if self.check_line(l)
             ]
             if len(points) <= 1:
                 return self.deduplicate_lines([LineSegment(mb=pt) for pt in points])
-            points = np.vstack(points)
             clusterFinder = ClusterFinder(n_clusters=2, n_jobs=1)
-            try:
-                clusterFinder.fit(points)
-            except ValueError:
-                bk()
+            clusterFinder.fit(np.vstack(points))
             deduplicatedLines = [
                 LineSegment(xyxy=None, mb=mb)
                 for mb in clusterFinder.cluster_centers_
@@ -243,101 +277,95 @@ class Pipeline(object):
 
         return deduplicatedLines
 
-    def bakeLines(self, originalImage, lines, thickness=12, color=(232, 119, 34), alpha=1):
+    def smooth_history(self, lines, nsmooth):
+        if not hasattr(self, 'lineHistory'):
+            
+            self.lineHistory = deque(maxlen=nsmooth)
+        if len(lines) == 2:
+            self.lineHistory.append(lines)
+        mbs = [
+            [
+                (linePair[k].m, linePair[k].b)
+                for linePair in self.lineHistory
+            ]
+            for k in range(2)
+        ]
+        ms = [np.mean([mb[0] for mb in mbsk]) for mbsk in mbs]
+        bs = [np.mean([mb[1] for mb in mbsk]) for mbsk in mbs]
+        lines = [
+            LineSegment(mb=(m, b))
+            for (m, b) in zip(ms, bs)
+        ]
+        return lines
+
+    def bake_lines(self, originalImage, lines, thickness=12, color=(232, 119, 34), alpha=1):
         return weighted_img(
             draw_hough_lines([l.xyxy for l in lines], self.rows, self.cols, thickness=thickness, color=color),
             originalImage,
             alpha=alpha
         )
 
-    def __call__(self, image, lineHistory=None):
+    def __call__(self, image, smoothing=False, nsmooth=12):
         # Preprocess the image.
         preparedImage = self.prepare(np.copy(image))
 
         # Find the lines.
-        allLines = self.findLines(preparedImage)
+        allLines = self.find_lines(preparedImage)
         lines = self.deduplicate_lines(allLines)
-        if lineHistory is not None:
-            if len(lines) == 2:
-                lineHistory.append(lines)
-            mbs = [
-                [
-                    (lp[k].m, lp[k].b)
-                    for lp in lineHistory
-                ]
-                for k in range(2)
-            ]
-            ms = [np.mean([mb[0] for mb in mbsk]) for mbsk in mbs]
-            bs = [np.mean([mb[1] for mb in mbsk]) for mbsk in mbs]
-            lines = [
-                LineSegment(mb=(m, b))
-                for (m, b) in zip(ms, bs)
-            ]
-
-        self.recutLines(lines)
+        if smoothing:
+            lines = self.smooth_history(lines, nsmooth)
+        self.recut_lines(lines)
 
         # Draw the lines.
         if self.debug:
             baked = np.copy(preparedImage)
             filteredLines = [
                 l for l in allLines
-                if self.checkLine(l)
+                if self.check_line(l)
             ]
-            baked = self.bakeLines(baked, filteredLines, color=self.debugColor, thickness=self.debugThickness)
+            baked = self.bake_lines(baked, filteredLines, color=self.debugColor, thickness=self.debugThickness)
 
             # Put some info in the top left corner.
-            infoImg = padImg(self.mbDist(filteredLines, lines)[:, :, :3], baked.shape)
+            infoImg = pad_image(self.make_mb_distribution_plot_image(filteredLines, lines)[:, :, :3], baked.shape)
             baked = weighted_img(infoImg, baked, alpha=1)
 
         else:
             baked = np.copy(image)
-        baked = self.bakeLines(baked, lines, alpha=.5)
+        baked = self.bake_lines(baked, lines, alpha=.5)
         return baked
 
-    def getLines(self, image):
-        preparedImage = self.prepare(np.copy(image))
-        allLines = self.findLines(preparedImage)
-        return self.recutLines(self.deduplicate_lines(allLines))
-
-    def recutLines(self, lines):
+    def recut_lines(self, lines):
         vy = self.vertices[:, 1]
         for l in lines:
-            l.extendToHorizontalBorders(top=max(vy), bottom=min(vy))
+            l.extend_to_horizontal_borders(top=max(vy), bottom=min(vy))
         return lines
         
-    def prettyShow(self, image):
+    def pretty_show(self, image):
         '''Make a nicer annotated figure.'''
         fig, ax = plt.subplots()
         preparedImage = self.prepare(image)
-        allLines = self.findLines(preparedImage)
-        lines = self.recutLines(self.deduplicate_lines(allLines))
+        allLines = self.find_lines(preparedImage)
+        lines = self.recut_lines(self.deduplicate_lines(allLines))
         ax.imshow(image)
         for l in lines:
-            l.plotline(ax, lw=8, linestyle='-', color='orange', alpha=.9)
+            l.plot_line(ax, lw=8, linestyle='-', color='orange', alpha=.9)
         for l in allLines:
-            l.plotline(ax, lw=1, linestyle='-', color='magenta', alpha=.5)
+            l.plot_line(ax, lw=1, linestyle='-', color='magenta', alpha=.5)
         v = self.vertices.squeeze()
-        drawPolygon(v, ax, alpha=.1, edgecolor='black', facecolor='orange')
+        draw_polygon(v, ax, alpha=.1, edgecolor='black', facecolor='orange')
         ax.grid(True)
         ax.set_ylim((image.shape[0], 0))
         ax.set_xlim((0, image.shape[1]));
         ax.set_xticks([])
         ax.set_yticks([])
         return fig, ax
-
-    def processVideo(self, inpath, outpath, audio=False, subsection=None, show=True):
+        
+    def process_video(self, inpath, outpath, audio=False, subsection=None, show=True, smoothing=True, nsmooth=12):
         from moviepy.editor import VideoFileClip
         inclip = VideoFileClip(inpath)
         if subsection is not None:
             inclip = inclip.subclip(*subsection)
-        if self.smoothing:
-            from collections import deque
-            lastkedges = deque(maxlen=self.nsmooth)
-            def f(image):
-                return self(image, lineHistory=lastkedges)
-        else:
-            f = self
-        outclip = inclip.fl_image(f)
+        outclip = inclip.fl_image(lambda img: self(img, smoothing=smoothing, nsmooth=nsmooth))
         outclip.write_videofile(outpath, audio=audio)
         if show:
             from IPython.display import HTML
@@ -347,17 +375,15 @@ class Pipeline(object):
                 </video>
             """.format(outpath))
 
-    def mbDist(self, lines, linesdedup):
+    def make_mb_distribution_plot_image(self, lines, linesdedup):
         '''Make a plot with some extra information to put in the corner of the video.'''
-        import matplotlib.pyplot as plt
         import matplotlib as mpl
         for k in 'xtick', 'ytick', 'axes':
             mpl.rc(k, labelsize=10)
-        import numpy as np
         l2p = lambda ls: np.stack([
                 (l.m, l.b)
                 for l in ls
-                if self.checkLine(l)
+                if self.check_line(l)
             ])
         fig, ax = plt.subplots(figsize=(4, 3))
         ax.scatter(l2p(lines)[:, 0], l2p(lines)[:, 1], color='yellow', s=24)
@@ -375,12 +401,12 @@ class Pipeline(object):
         return out
 
 
-def padImg(small, targetShape, padValue=0):
+def pad_image(small, targetShape, padValue=0):
     if len(targetShape) == 2:
         targetShape = list(targetShape)
         targetShape.append(3)
     out = np.ones(targetShape, dtype=small.dtype) * padValue
-    out[:small.shape[0], :small.shape[1], :] = toColorIfBW(small)
+    out[:small.shape[0], :small.shape[1], :] = to_color_if_bw(small)
     return out
 
 
@@ -403,7 +429,7 @@ def fig2data(fig):
     return buf
 
 
-def saveImage(data, path):
+def save_image(data, path):
     from PIL import Image
     Image.fromarray(
         (255.0 / data.max() * (data - data.min())).astype(np.uint8)
@@ -452,7 +478,7 @@ class LineSegment(object):
     def x(self, y):
         return (y - self.b) / self.m
 
-    def extendToHorizontalBorders(self, top, bottom):
+    def extend_to_horizontal_borders(self, top, bottom):
         if self.m == 0:
             return # Can't extend up or down!
         self.xyxy[0] = self.x(bottom)
@@ -460,7 +486,7 @@ class LineSegment(object):
         self.xyxy[2] = self.x(top)
         self.xyxy[3] = top
 
-    def plotline(self, ax, extraxy=None, **kwargs):
+    def plot_line(self, ax, extraxy=None, **kwargs):
         '''Pretty-plot a line on an axis.'''
         l = self.xyxy
         x = [l[0], l[2]]
